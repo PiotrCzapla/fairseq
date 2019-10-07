@@ -41,9 +41,8 @@ def evaluate_roberta():
     def predict_generator(sentences_stream):
         for pairId, sentences in tqdm.tqdm(list(sorted(sentences_stream, key=lambda x: -(len(x[1][0])+len(x[1][1]))))):
             tokens = hub_model.encode(*sentences)
-            extra = len(tokens) - 512
-            if extra > 0:
-                tokens = tokens[extra//2:len(tokens)-extra//2+1]
+            strip = max(0, len(tokens) - 512) // 2
+            tokens = tokens[strip:-strip-2]
             pred_class = predict_mnli(hub_model, tokens)
             
             # s0 = hub_model.encode(*sentences)
