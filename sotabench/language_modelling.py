@@ -123,8 +123,8 @@ def evaluate_language_model(evaluator, model, parsed_args):
             gen_timer.stop(sample['ntokens'])
     evaluator.save()
     print("evaluator.results: ", evaluator.results, evaluator)
-    print('| Evaluated {} tokens in {:.1f}s ({:.2f} tokens/s)'.format(gen_timer.n,
-                                                                      gen_timer.sum, 1. / gen_timer.avg))
+    # print('| Evaluated {} tokens in {:.1f}s ({:.2f} tokens/s)'.format(gen_timer.n,
+    #                                                                   gen_timer.sum, 1. / gen_timer.avg))
     evaluator.print_stats()
     return evaluator.results
 
