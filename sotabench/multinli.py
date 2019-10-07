@@ -52,7 +52,7 @@ def evaluate_roberta():
             # pred_class = predict_mnli(hub_model, tokens)
             yield pairId, pred_class
 
-    data = evaluator.dataset
+    data = evaluator.data_generator
     #data = islice(data, 100)
     evaluator.eval(predict_generator(data))
     print(evaluator.results)
