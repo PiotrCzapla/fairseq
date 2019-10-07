@@ -26,7 +26,7 @@ def evaluate_roberta():
         model_name="ROBERTa",
         paper_arxiv_id="1907.11692",
         paper_pwc_id="roberta-a-robustly-optimized-bert-pretraining",
-        local_root=Path.home()/"sotabench/data/multinli",
+        local_root=Path.home()/".cache/sotabench/data/multinli",
         #expected accuracy on devset: 90.2/90.2
     )
     # we can either read the data our selfs from files in path = evaluator.dataset_paths
