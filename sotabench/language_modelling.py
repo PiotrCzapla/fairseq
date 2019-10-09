@@ -125,8 +125,7 @@ def evaluate_language_model(evaluator, model, parsed_args):
     print("evaluator.results: ", evaluator.results, evaluator)
     # print('| Evaluated {} tokens in {:.1f}s ({:.2f} tokens/s)'.format(gen_timer.n,
     #                                                                   gen_timer.sum, 1. / gen_timer.avg))
-    evaluator.print_stats()
-    return evaluator.results
+    evaluator.print_results()
 
 def evaluate_transformer_lm():
     evaluator = WikiText103Evaluator(
@@ -150,7 +149,6 @@ def evaluate_transformer_lm():
     args = options.parse_args_and_arch(parser, input_args=input_args)
 
     evaluate_language_model(evaluator, hub_model, args)
-
 
 def main():
     evaluate_transformer_lm()
