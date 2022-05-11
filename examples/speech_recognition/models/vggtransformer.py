@@ -9,17 +9,22 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
+from examples.speech_recognition.data.data_utils import lengths_to_encoder_padding_mask
 from fairseq import utils
 from fairseq.models import (
     FairseqEncoder,
-    FairseqIncrementalDecoder,
     FairseqEncoderDecoderModel,
+    FairseqEncoderModel,
+    FairseqIncrementalDecoder,
     register_model,
     register_model_architecture,
 )
-from fairseq.modules import LinearizedConvolution
-from examples.speech_recognition.data.data_utils import lengths_to_encoder_padding_mask
-from fairseq.modules import TransformerDecoderLayer, TransformerEncoderLayer, VGGBlock
+from fairseq.modules import (
+    LinearizedConvolution,
+    TransformerDecoderLayer,
+    TransformerEncoderLayer,
+    VGGBlock,
+)
 
 
 @register_model("asr_vggtransformer")
@@ -28,6 +33,7 @@ class VGGTransformerModel(FairseqEncoderDecoderModel):
     Transformers with convolutional context for ASR
     https://arxiv.org/abs/1904.11660
     """
+
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
 
@@ -197,6 +203,7 @@ def prepare_transformer_decoder_params(
     relu_dropout,
 ):
     args = argparse.Namespace()
+    args.encoder_embed_dim = None
     args.decoder_embed_dim = input_dim
     args.decoder_attention_heads = num_heads
     args.attention_dropout = attention_dropout
@@ -250,6 +257,7 @@ class VGGTransformerEncoder(FairseqEncoder):
         self.conv_layers = nn.ModuleList()
         self.in_channels = in_channels
         self.input_dim = input_feat_per_channel
+        self.pooling_kernel_sizes = []
 
         if vggblock_config is not None:
             for _, config in enumerate(vggblock_config):
@@ -271,6 +279,7 @@ class VGGTransformerEncoder(FairseqEncoder):
                         layer_norm=layer_norm,
                     )
                 )
+                self.pooling_kernel_sizes.append(pooling_kernel_size)
                 in_channels = out_channels
                 input_feat_per_channel = self.conv_layers[-1].output_dim
 
@@ -335,9 +344,9 @@ class VGGTransformerEncoder(FairseqEncoder):
         x = x.transpose(1, 2).transpose(0, 1)
         x = x.contiguous().view(output_seq_len, bsz, -1)
 
-        subsampling_factor = int(max_seq_len * 1.0 / output_seq_len + 0.5)
-        # TODO: shouldn't subsampling_factor determined in advance ?
-        input_lengths = (src_lengths.float() / subsampling_factor).ceil().long()
+        input_lengths = src_lengths.clone()
+        for s in self.pooling_kernel_sizes:
+            input_lengths = (input_lengths.float() / s).ceil().long()
 
         encoder_padding_mask, _ = lengths_to_encoder_padding_mask(
             input_lengths, batch_first=True
@@ -345,6 +354,7 @@ class VGGTransformerEncoder(FairseqEncoder):
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
 
+        subsampling_factor = int(max_seq_len * 1.0 / output_seq_len + 0.5)
         attn_mask = self.lengths_to_attn_mask(input_lengths, subsampling_factor)
 
         transformer_layer_idx = 0
@@ -393,9 +403,9 @@ class VGGTransformerEncoder(FairseqEncoder):
             input_dim, num_heads = config[:2]
             if input_dim % num_heads != 0:
                 msg = (
-                    "ERROR in transformer config {}:".format(config)
+                    "ERROR in transformer config {}: ".format(config)
                     + "input dimension {} ".format(input_dim)
-                    + "not dividable by number of heads".format(num_heads)
+                    + "not dividable by number of heads {}".format(num_heads)
                 )
                 raise ValueError(msg)
 
@@ -458,7 +468,7 @@ class VGGTransformerEncoder(FairseqEncoder):
         if len(transformer_sampling) != num_layers:
             raise ValueError(
                 "transformer_sampling {} does not match with the number "
-                + "of layers {}".format(transformer_sampling, num_layers)
+                "of layers {}".format(transformer_sampling, num_layers)
             )
 
         for layer, value in enumerate(transformer_sampling):
@@ -598,18 +608,22 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.layers = nn.ModuleList()
         if conv_config[-1][0] != transformer_config[0][0]:
             self.layers.append(Linear(conv_config[-1][0], transformer_config[0][0]))
-        self.layers.append(TransformerDecoderLayer(
-            prepare_transformer_decoder_params(*transformer_config[0])
-        ))
+        self.layers.append(
+            TransformerDecoderLayer(
+                prepare_transformer_decoder_params(*transformer_config[0])
+            )
+        )
 
         for i in range(1, len(transformer_config)):
             if transformer_config[i - 1][0] != transformer_config[i][0]:
                 self.layers.append(
                     Linear(transformer_config[i - 1][0], transformer_config[i][0])
                 )
-            self.layers.append(TransformerDecoderLayer(
-                prepare_transformer_decoder_params(*transformer_config[i])
-            ))
+            self.layers.append(
+                TransformerDecoderLayer(
+                    prepare_transformer_decoder_params(*transformer_config[i])
+                )
+            )
         self.fc_out = Linear(transformer_config[-1][0], vocab_size)
 
     def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
@@ -655,7 +669,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         # decoder layers
         for layer in self.layers:
             if isinstance(layer, TransformerDecoderLayer):
-                x, _ = layer(
+                x, *_ = layer(
                     x,
                     (encoder_out["encoder_out"] if encoder_out is not None else None),
                     (
@@ -708,6 +722,142 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if incremental_state:
             x = x.transpose(0, 1)
         return x
+
+
+@register_model("asr_vggtransformer_encoder")
+class VGGTransformerEncoderModel(FairseqEncoderModel):
+    def __init__(self, encoder):
+        super().__init__(encoder)
+
+    @staticmethod
+    def add_args(parser):
+        """Add model-specific arguments to the parser."""
+        parser.add_argument(
+            "--input-feat-per-channel",
+            type=int,
+            metavar="N",
+            help="encoder input dimension per input channel",
+        )
+        parser.add_argument(
+            "--vggblock-enc-config",
+            type=str,
+            metavar="EXPR",
+            help="""
+    an array of tuples each containing the configuration of one vggblock
+    [(out_channels, conv_kernel_size, pooling_kernel_size,num_conv_layers), ...]
+    """,
+        )
+        parser.add_argument(
+            "--transformer-enc-config",
+            type=str,
+            metavar="EXPR",
+            help="""
+    a tuple containing the configuration of the Transformer layers
+    configurations:
+    [(input_dim,
+      num_heads,
+      ffn_dim,
+      normalize_before,
+      dropout,
+      attention_dropout,
+      relu_dropout), ]""",
+        )
+        parser.add_argument(
+            "--enc-output-dim",
+            type=int,
+            metavar="N",
+            help="encoder output dimension, projecting the LSTM output",
+        )
+        parser.add_argument(
+            "--in-channels",
+            type=int,
+            metavar="N",
+            help="number of encoder input channels",
+        )
+        parser.add_argument(
+            "--transformer-context",
+            type=str,
+            metavar="EXPR",
+            help="""
+    either None or a tuple of two ints, indicating left/right context a
+    transformer can have access to""",
+        )
+        parser.add_argument(
+            "--transformer-sampling",
+            type=str,
+            metavar="EXPR",
+            help="""
+    either None or a tuple of ints, indicating sampling factor in each layer""",
+        )
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+        base_architecture_enconly(args)
+        encoder = VGGTransformerEncoderOnly(
+            vocab_size=len(task.target_dictionary),
+            input_feat_per_channel=args.input_feat_per_channel,
+            vggblock_config=eval(args.vggblock_enc_config),
+            transformer_config=eval(args.transformer_enc_config),
+            encoder_output_dim=args.enc_output_dim,
+            in_channels=args.in_channels,
+            transformer_context=eval(args.transformer_context),
+            transformer_sampling=eval(args.transformer_sampling),
+        )
+        return cls(encoder)
+
+    def get_normalized_probs(self, net_output, log_probs, sample=None):
+        # net_output['encoder_out'] is a (T, B, D) tensor
+        lprobs = super().get_normalized_probs(net_output, log_probs, sample)
+        # lprobs is a (T, B, D) tensor
+        # we need to transoose to get (B, T, D) tensor
+        lprobs = lprobs.transpose(0, 1).contiguous()
+        lprobs.batch_first = True
+        return lprobs
+
+
+class VGGTransformerEncoderOnly(VGGTransformerEncoder):
+    def __init__(
+        self,
+        vocab_size,
+        input_feat_per_channel,
+        vggblock_config=DEFAULT_ENC_VGGBLOCK_CONFIG,
+        transformer_config=DEFAULT_ENC_TRANSFORMER_CONFIG,
+        encoder_output_dim=512,
+        in_channels=1,
+        transformer_context=None,
+        transformer_sampling=None,
+    ):
+        super().__init__(
+            input_feat_per_channel=input_feat_per_channel,
+            vggblock_config=vggblock_config,
+            transformer_config=transformer_config,
+            encoder_output_dim=encoder_output_dim,
+            in_channels=in_channels,
+            transformer_context=transformer_context,
+            transformer_sampling=transformer_sampling,
+        )
+        self.fc_out = Linear(self.encoder_output_dim, vocab_size)
+
+    def forward(self, src_tokens, src_lengths, **kwargs):
+        """
+        src_tokens: padded tensor (B, T, C * feat)
+        src_lengths: tensor of original lengths of input utterances (B,)
+        """
+
+        enc_out = super().forward(src_tokens, src_lengths)
+        x = self.fc_out(enc_out["encoder_out"])
+        # x = F.log_softmax(x, dim=-1)
+        # Note: no need this line, because model.get_normalized_prob will call
+        # log_softmax
+        return {
+            "encoder_out": x,  # (T, B, C)
+            "encoder_padding_mask": enc_out["encoder_padding_mask"],  # (T, B)
+        }
+
+    def max_positions(self):
+        """Maximum input length supported by the encoder."""
+        return (1e6, 1e6)  # an arbitrary large number
 
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):
@@ -836,3 +986,35 @@ def vggtransformer_base(args):
     #   - FC: 512*5000 = 256K (assuming vocab size 5K)
     # In total:
     #       ~65 M
+
+
+# CTC models
+def base_architecture_enconly(args):
+    args.input_feat_per_channel = getattr(args, "input_feat_per_channel", 40)
+    args.vggblock_enc_config = getattr(
+        args, "vggblock_enc_config", "[(32, 3, 2, 2, True)] * 2"
+    )
+    args.transformer_enc_config = getattr(
+        args, "transformer_enc_config", "((256, 4, 1024, True, 0.2, 0.2, 0.2),) * 2"
+    )
+    args.enc_output_dim = getattr(args, "enc_output_dim", 512)
+    args.in_channels = getattr(args, "in_channels", 1)
+    args.transformer_context = getattr(args, "transformer_context", "None")
+    args.transformer_sampling = getattr(args, "transformer_sampling", "None")
+
+
+@register_model_architecture("asr_vggtransformer_encoder", "vggtransformer_enc_1")
+def vggtransformer_enc_1(args):
+    # vggtransformer_1 is the same as vggtransformer_enc_big, except the number
+    # of layers is increased to 16
+    # keep it here for backward compatiablity purpose
+    args.input_feat_per_channel = getattr(args, "input_feat_per_channel", 80)
+    args.vggblock_enc_config = getattr(
+        args, "vggblock_enc_config", "[(64, 3, 2, 2, True), (128, 3, 2, 2, True)]"
+    )
+    args.transformer_enc_config = getattr(
+        args,
+        "transformer_enc_config",
+        "((1024, 16, 4096, True, 0.15, 0.15, 0.15),) * 16",
+    )
+    args.enc_output_dim = getattr(args, "enc_output_dim", 1024)
